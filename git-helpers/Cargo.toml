@@ -14,15 +14,16 @@ path = "../librad"
 
 [dependencies.radicle-keystore]
 git = "https://github.com/radicle-dev/radicle-keystore"
-rev = "3377e666bde3130a06dd19343e7df2eaa774176a"
+rev = "13eb49f85d574cff4abdbddc721226588a08f941"
+#rev = "3377e666bde3130a06dd19343e7df2eaa774176a"
 
 [dependencies.git2]
-version = "0"
+version = "0.13"
 default-features = false
 features = []
 
 [dependencies.libgit2-sys]
-version = "0"
+version = "0.12"
 default-features = false
 features = []
 
