@@ -17,13 +17,13 @@
 
 #![feature(async_closure)]
 
-use std::time::Duration;
+use std::{time::Duration, marker::PhantomData};
 
 use futures::{future, stream::StreamExt};
 use tempfile::tempdir;
 
 use librad::{
-    git::local::url::LocalUrl,
+    git::{local::url::LocalUrl, types::{NamespacedRef, remote::Remote, FlatRef, Force}},
     meta::{entity::Signatory, project::ProjectInfo},
     net::peer::{FetchInfo, Gossip, PeerEvent, Rev},
     signer::SomeSigner,
@@ -31,6 +31,7 @@ use librad::{
 };
 
 use librad_test::{
+    git::initial_commit,
     logging,
     rad::{
         entity::{Alice, Radicle},
@@ -395,4 +396,87 @@ async fn ask_and_clone() {
         assert!(peer2.storage().has_urn(&repo_urn).unwrap())
     })
     .await;
+}
+
+#[tokio::test]
+async fn menage_a_troi() {
+    logging::init();
+    const NUM_PEERS: usize = 3;
+    let peers = testnet::setup(NUM_PEERS).await.unwrap();
+
+    testnet::run_on_testnet(peers, NUM_PEERS, async move |mut apis| {
+        let (peer1, peer1_key) = apis.pop().unwrap();
+        let peer1_id = peer1.peer_id().clone();
+
+        let (peer2, _) = apis.pop().unwrap();
+        let peer2_id = peer2.peer_id().clone();
+        let peer2_addr = peer2.listen_addr();
+
+        let (peer3, _) = apis.pop().unwrap();
+
+        let mut alice = Alice::new(peer1_key.public());
+        let mut radicle = Radicle::new(&alice);
+        {
+            let resolves_to_alice = alice.clone();
+            alice
+                .sign(&peer1_key, &Signatory::OwnedKey, &resolves_to_alice)
+                .unwrap();
+            radicle
+                .sign(
+                    &peer1_key,
+                    &Signatory::User(alice.urn()),
+                    &resolves_to_alice,
+                )
+                .unwrap();
+        }
+        peer1.storage().create_repo(&alice).unwrap();
+        peer1.storage().create_repo(&radicle).unwrap();
+
+        librad::git::local::transport::register(librad::git::local::transport::Settings {
+            paths: peer1.paths().clone(),
+            signer: SomeSigner { signer: peer1_key }.into(),
+        });
+
+        let tmp = tempfile::tempdir().unwrap();
+        // Perform commit and push to working copy on peer1
+        let repo = git2::Repository::init(tmp.path().join("peer1")).unwrap();
+        let url = LocalUrl::from_urn(radicle.urn(), peer1.peer_id().clone());
+
+        let heads = NamespacedRef::heads(radicle.urn().id, Some(peer1.peer_id().clone()));
+        let remotes: FlatRef<String, _> = FlatRef::heads(
+            PhantomData,
+            Some(format!("{}@{}", alice.name(), peer1.peer_id())),
+        );
+
+        let remote = Remote::rad_remote(url, Some(remotes.refspec(heads, Force::True).into_dyn()));
+
+        let _commit_id =
+            initial_commit(&repo, remote, &format!("refs/heads/{}", radicle.default_branch()), None).unwrap();
+
+        tokio::task::spawn_blocking(move || {
+            let head = NamespacedRef::head(radicle.urn().id, peer1_id.clone(), radicle.default_branch());
+            {
+                let git2 = peer2.storage();
+                git2.clone_repo::<ProjectInfo, _>(
+                    radicle.urn().into_rad_url(peer1_id.clone()),
+                    Some(peer1.listen_addr()),
+                )
+                .unwrap();
+                assert!(git2.has_ref(&head).unwrap(), format!("missing ref '{}'", head));
+            }
+            {
+                let git3 = peer3.storage();
+                git3.clone_repo::<ProjectInfo, _>(
+                    radicle.urn().into_rad_url(peer2_id),
+                    Some(peer2_addr),
+                ).unwrap();
+                assert!(git3.has_ref(&head).unwrap(), format!("missing ref '{}'", head));
+            }
+        })
+        .await
+        .unwrap();
+
+    })
+    .await;
+
 }
