@@ -895,6 +895,7 @@ dependencies = [
  "async-trait",
  "env_logger",
  "futures",
+ "git2",
  "lazy_static",
  "librad",
  "minicbor",
