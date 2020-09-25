@@ -19,6 +19,7 @@ use std::{
     future::Future,
     io,
     net::{IpAddr, SocketAddr},
+    sync::Arc,
     time::Duration,
 };
 
@@ -33,7 +34,11 @@ use tokio::task::{block_in_place, spawn_blocking};
 use tracing_futures::Instrument as _;
 
 use crate::{
-    git::{self, p2p::server::GitServer, storage},
+    git::{
+        self,
+        p2p::{server::GitServer, transport::GitStreamFactory},
+        storage,
+    },
     internal::channel::Fanout,
     keys::{self, AsPKCS8},
     net::{
@@ -170,6 +175,8 @@ pub struct PeerApi<S> {
     storage: storage::Pool<S>,
     subscribers: Fanout<PeerEvent>,
     paths: Paths,
+
+    _git_transport_protocol_ref: Arc<Box<dyn GitStreamFactory>>,
 }
 
 impl<S> PeerApi<S>
@@ -300,6 +307,12 @@ pub struct Peer<S> {
     protocol: Protocol<PeerStorage<S>, Gossip>,
     run_loop: RunLoop,
     subscribers: Fanout<PeerEvent>,
+
+    // We cannot cast `Arc<Box<Protocol<A, B>>>` to `Arc<Box<dyn GitStreamFactory>>`
+    // apparenty, so need to keep an `Arc` of the trait object here in order to
+    // hand out `Weak` pointers to
+    // `git::p2p::transport::RadTransport::register_stream_factory`
+    _git_transport_protocol_ref: Arc<Box<dyn GitStreamFactory>>,
 }
 
 impl<S> Peer<S>
@@ -323,6 +336,8 @@ where
             protocol: self.protocol,
             subscribers: self.subscribers,
             paths: self.paths,
+
+            _git_transport_protocol_ref: self._git_transport_protocol_ref,
         };
         Ok((api, self.run_loop))
     }
@@ -366,8 +381,10 @@ where
         );
 
         let (protocol, run_loop) = Protocol::new(gossip, git, endpoint, config.disco.discover());
+        let _git_transport_protocol_ref =
+            Arc::new(Box::new(protocol.clone()) as Box<dyn GitStreamFactory>);
         git::p2p::transport::register()
-            .register_stream_factory(&peer_id, Box::new(protocol.clone()));
+            .register_stream_factory(&peer_id, Arc::downgrade(&_git_transport_protocol_ref));
 
         Ok(Self {
             paths: config.paths,
@@ -377,6 +394,7 @@ where
             protocol,
             run_loop,
             subscribers,
+            _git_transport_protocol_ref,
         })
     }
 }
