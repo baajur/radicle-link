@@ -335,8 +335,11 @@ async fn all_metadata_returns_only_local_projects() {
 /// Given that a) a peer 1 holds a given URN and b) that same peer is a seed of
 /// a peer 2, verify that requesting peer 2 for providers for said URN returns
 /// peer 1.
+///
+/// Following that, verify that cloning from the returned PeerId means we have
+/// the URN in our monorepo.
 #[tokio::test]
-async fn providers_works() {
+async fn ask_and_clone() {
     logging::init();
     const NUM_PEERS: usize = 2;
     let peers = testnet::setup(NUM_PEERS).await.unwrap();
@@ -357,7 +360,6 @@ async fn providers_works() {
             )
             .unwrap();
 
-        let peer1_id = peer1.peer_id().clone();
         let repo_urn = tokio::task::spawn_blocking(move || {
             let git = peer1.storage();
             git.create_repo(&alice).unwrap();
@@ -368,19 +370,29 @@ async fn providers_works() {
 
         let (peer2, _) = apis.pop().unwrap();
         let res = peer2
-            .providers(repo_urn, Duration::from_secs(5))
+            .providers(repo_urn.clone(), Duration::from_secs(5))
             .await
             .next()
             .await;
 
-        match res {
-            Some(peer_info) => assert_eq!(
-                peer_info.peer_id, peer1_id,
-                "Expected peer id {} but got {} instead",
-                peer1_id, peer_info.peer_id
-            ),
-            None => panic!("Expected to have obtained the peer1 but got None instead"),
+        let peer_id = match res {
+            Some(peer_info) => peer_info.peer_id,
+            None => panic!("Expected to have obtained peer1 but got None instead"),
+        };
+
+        assert!(!peer2.storage().has_urn(&repo_urn).unwrap());
+
+        {
+            let url = repo_urn.clone().into_rad_url(peer_id);
+            let git = peer2.storage().reopen().unwrap();
+            tokio::task::spawn_blocking(move || {
+                git.clone_repo::<ProjectInfo, _>(url, None).unwrap();
+            })
+            .await
+            .unwrap();
         }
+
+        assert!(peer2.storage().has_urn(&repo_urn).unwrap())
     })
     .await;
 }
