@@ -30,7 +30,7 @@ use futures::{
 };
 use futures_timer::Delay;
 use thiserror::Error;
-use tokio::task::{block_in_place, spawn_blocking};
+use tokio::task::spawn_blocking;
 use tracing_futures::Instrument as _;
 
 use crate::{
@@ -446,15 +446,20 @@ where
     ) -> bool {
         let git = self.inner.get().await.unwrap();
         let urn = urn_context(git.peer_id(), urn);
-        block_in_place(|| match head.into() {
+        let head = head.into();
+        spawn_blocking(move || match head {
             None => git.has_urn(&urn).unwrap_or(false),
             Some(head) => git.has_commit(&urn, head).unwrap_or(false),
         })
+        .await
+        .expect("`PeerStorage::git_has` panicked")
     }
 
-    async fn is_tracked(&self, urn: &RadUrn, peer: &PeerId) -> Result<bool, PeerStorageError> {
+    async fn is_tracked(&self, urn: RadUrn, peer: PeerId) -> Result<bool, PeerStorageError> {
         let git = self.inner.get().await?;
-        Ok(block_in_place(|| git.is_tracked(urn, peer))?)
+        Ok(spawn_blocking(move || git.is_tracked(&urn, &peer))
+            .await
+            .expect("`PeerStorage::is_tracked` panicked")?)
     }
 }
 
@@ -506,7 +511,7 @@ where
         match has.urn.proto {
             uri::Protocol::Git => {
                 let peer_id = has.origin.clone().unwrap_or_else(|| provider.clone());
-                let is_tracked = match self.is_tracked(&has.urn, &peer_id).await {
+                let is_tracked = match self.is_tracked(has.urn.clone(), peer_id).await {
                     Ok(b) => b,
                     Err(e) => {
                         tracing::error!(err = %e, "Git::Storage::is_tracked error");
